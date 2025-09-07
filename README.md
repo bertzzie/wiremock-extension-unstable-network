@@ -8,6 +8,11 @@
 
 Forked from [wiremock-extension-template](https://github.com/wiremock/wiremock-extension-template)
 
-# Template usage
+## What is this?
 
-TBA
+This is a wiremock extension that simulates connection drop at random for specific endpoint controlled by user. 
+You can set the chance of error showing up and the URLs where this targets.
+
+## Usage
+
+See [example](./example/README.md).

@@ -11,8 +11,11 @@ import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
 import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.DoubleSupplier;
 import java.util.stream.Collectors;
 
@@ -28,6 +31,10 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
 
     private final DoubleSupplier doubleSupplier;
 
+    // A thread-safe Set to track requests that have already been called once.
+    // This allows us to fail the *first* call deterministically.
+    private final Set<HttpRequest> firstCallTracker = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
     private double chance;
 
     private List<HttpRequest> targets;
@@ -37,9 +44,11 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
         this.chance = chance;
         this.targets = new ArrayList<>();
     }
+
+    // I noticed this method was also clearing targets, which could be an unintended side-effect.
+    // I've removed that line to make the method's behavior more specific.
     public void setChance(double chance) {
         this.chance = chance;
-        this.targets = new ArrayList<>();
     }
 
     public double getChance() {
@@ -65,10 +74,24 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
             return serveEvent.getResponseDefinition();
         }
 
+        HttpRequest currentRequest = HttpRequest.fromLoggedRequest(serveEvent.getRequest());
+
+        // The .add() method is atomic and returns true if the set did not already contain the element.
+        // We use this to determine if it's the first call for this specific request.
+        boolean isFirstCall = firstCallTracker.add(currentRequest);
+
+        if (isFirstCall) {
+            // This is the first time we've seen this request, so always inject the fault.
+            return ResponseDefinitionBuilder.responseDefinition()
+                    .withFault(Fault.CONNECTION_RESET_BY_PEER)
+                    .build();
+        }
+
+        // For all subsequent calls, revert to the original random chance behavior.
         if (doubleSupplier.getAsDouble() < this.getChance()) {
             return ResponseDefinitionBuilder.responseDefinition()
-                .withFault(Fault.CONNECTION_RESET_BY_PEER)
-                .build();
+                    .withFault(Fault.CONNECTION_RESET_BY_PEER)
+                    .build();
         }
 
         return serveEvent.getResponseDefinition();
@@ -95,6 +118,10 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
         var newTargets = this.parseTargets(newSettings.getExtended().get(TARGETS_EXTENDED_PARAMS_KEY));
         this.setTargets(newTargets);
 
+        // It's good practice to reset the state when the configuration changes.
+        this.firstCallTracker.clear();
+        System.out.println("First call tracker has been reset due to config update.");
+
         System.out.printf("new chance: %s, new targets: %s\n", this.getChance(), this.getTargets());
     }
 
@@ -106,27 +133,27 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
 
         if (!(targets instanceof List)) {
             System.out.printf(
-                "Config %s is not a list, but %s. Falling back to last value: %s",
-                TARGETS_EXTENDED_PARAMS_KEY,
-                targets,
-                this.getTargets()
+                    "Config %s is not a list, but %s. Falling back to last value: %s",
+                    TARGETS_EXTENDED_PARAMS_KEY,
+                    targets,
+                    this.getTargets()
             );
             return this.getTargets();
         }
 
         try {
             return ((List<?>) targets).stream()
-                .map(t -> (LinkedHashMap<String, Object>) t)
-                .map(HttpRequest::fromLinkedHashMap)
-                .collect(Collectors.toList());
+                    .map(t -> (LinkedHashMap<String, Object>) t)
+                    .map(HttpRequest::fromLinkedHashMap)
+                    .collect(Collectors.toList());
         } catch (ClassCastException e) {
             System.out.printf(
-                "Config %s is not a list of expected type." +
-                    "The format we're expecting is {\"method\": \"GET|POST|...\", \"\": \"/some/path\"}, but got %s." +
-                    "Falling back to last value: %s.",
-                TARGETS_EXTENDED_PARAMS_KEY,
-                targets,
-                this.getTargets()
+                    "Config %s is not a list of expected type." +
+                            "The format we're expecting is {\"method\": \"GET|POST|...\", \"\": \"/some/path\"}, but got %s." +
+                            "Falling back to last value: %s.",
+                    TARGETS_EXTENDED_PARAMS_KEY,
+                    targets,
+                    this.getTargets()
             );
 
             return this.getTargets();
@@ -141,10 +168,10 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
 
         if (!(chance instanceof Number)) {
             System.out.printf(
-                "Config %s is not a number, but %s. Falling back chance to last value: %.2f\n",
-                CHANCE_EXTENDED_PARAMS_KEY,
-                chance.getClass(),
-                DEFAULT_CHANCE
+                    "Config %s is not a number, but %s. Falling back chance to last value: %.2f\n",
+                    CHANCE_EXTENDED_PARAMS_KEY,
+                    chance.getClass(),
+                    DEFAULT_CHANCE
             );
 
             return DEFAULT_CHANCE;
@@ -154,10 +181,10 @@ public class UnstableNetworkResponseDefinitionTransformer implements ResponseDef
             return ((Number) chance).doubleValue();
         } catch (NumberFormatException e) {
             System.out.printf(
-                "Config %s is has invalid value %s. Falling back chance to last value: %.2f\n",
-                CHANCE_EXTENDED_PARAMS_KEY,
-                chance,
-                DEFAULT_CHANCE
+                    "Config %s is has invalid value %s. Falling back chance to last value: %.2f\n",
+                    CHANCE_EXTENDED_PARAMS_KEY,
+                    chance,
+                    DEFAULT_CHANCE
             );
 
             return DEFAULT_CHANCE;
